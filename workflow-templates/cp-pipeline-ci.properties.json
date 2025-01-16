@@ -1,0 +1,13 @@
+{
+    "name": "Course Production Workflow",
+    "description": "Course Production Pipeline CI workflow template.",
+    "iconName": "octicon smiley",
+    "categories": [
+        "continuous-integration"
+    ],
+    "filePatterns": [
+        "package.json$",
+        "^Dockerfile",
+        ".*\\.md$"
+    ]
+}
