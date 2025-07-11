@@ -18,7 +18,7 @@ jobs:
         uses: actions/checkout@v4
       # - name: Print all ENVS
       #   run: printenv
-      - name: Run Dagger for pipeline-manager development testing
+      - name: Run Dagger for pipeline-manager
         uses: dagger/dagger-for-github@8.0.0
         env:
           # setting tokens here so that it can be referenced below without exposing in dagger cloud logs
@@ -26,19 +26,17 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HELM_REPO_PAT: ${{ secrets.HELM_REPO_PAT }}
         with:
-          # module: github.com/BCIT-LTC/daggerverse/semantic-release
-          # call: semanticrelease --username ${{ github.actor }} --github_token env://GITHUB_TOKEN --source ./ 
           module: github.com/BCIT-LTC/daggerverse/pipeline-manager
           call: >-
             run 
             --source=. 
-            --username=${{ github.actor }} 
             --github_token=env://GITHUB_TOKEN  
+            --helm_repo_pat=env://HELM_REPO_PAT
+            --username=${{ github.actor }} 
             --branch=${{ github.ref_name }} 
             --commit_hash=$(echo $GITHUB_SHA | cut -c1-7) 
-            --registry_path=ghcr.io/$(echo "${{ github.repository }}") 
-            --repository_url=$(echo $GITHUB_SERVER_URL/$GITHUB_REPOSITORY)
-            --helm_repo_pat=env://HELM_REPO_PAT
+            --registry_path=ghcr.io/${{ github.repository }}
+            --repository_url=${{ github.server_url }}/${{ github.repository }}
           cloud-token: ${{ secrets.DAGGER_CLOUD_TOKEN }}
           version: "latest"
           
