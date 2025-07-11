@@ -3,13 +3,11 @@ name: Pipeline Manager
 on:
   workflow_call:
     secrets:
-      GITHUB_TOKEN:
-        required: true
       HELM_REPO_PAT:
         required: true
       DAGGER_CLOUD_TOKEN:
         required: true
-        
+
 permissions:
   contents: write # to be able to publish a GitHub release
   issues: write # to be able to comment on released issues
@@ -30,7 +28,7 @@ jobs:
         env:
           # setting tokens here so that it can be referenced below without exposing in dagger cloud logs
           # should be referenced as env://GITHUB_TOKEN in the Dagger module
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
           HELM_REPO_PAT: ${{ secrets.HELM_REPO_PAT }}
         with:
           module: github.com/BCIT-LTC/daggerverse/pipeline-manager
