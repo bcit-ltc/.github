@@ -1,0 +1,14 @@
+# Docker compose configuration
+name: ${APP_NAME}
+services:
+  app:
+    image: ${APP_NAME}
+    build:
+      target: build
+    environment:
+      - DEBUG=true
+      - CI=false
+    volumes:
+    - .:/app
+    ports:
+      - "8080:8080"
