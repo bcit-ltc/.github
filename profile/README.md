@@ -1,6 +1,6 @@
 ## Hi there 👋
 
-We are a small group of developers and technologists building apps and automations in 🇨🇦 Canada at [BCIT's](https://www.bcit.ca/) [Learning and Teaching Centre](https://www.bcit.ca/learning-teaching-centre/). [Contact Us](mailto:courseproduction@bcit.ca).
+We are a small group of developers and technologists making learning apps and automations for teaching. Apps and services listed here are developed in 🇨🇦 Canada by the [Learning and Teaching Centre](https://www.bcit.ca/learning-teaching-centre/) at [BCIT](https://www.bcit.ca/).
 <!--
 
 **Here are some ideas to get you started:**
