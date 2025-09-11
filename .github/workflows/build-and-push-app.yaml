@@ -24,9 +24,14 @@ jobs:
       image: ${{ steps.vars.outputs.image }}
       is_release: ${{ steps.vars.outputs.is_release }}
       version: ${{ steps.vars.outputs.version }}
+
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
+
+      - name: Install Git LFS
+        run: |
+          git lfs install
 
       - name: Run Semantic Release
         id: semrel
