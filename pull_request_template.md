@@ -1,1 +1,1 @@
-Closes #<issue-number>
+Closes issue #

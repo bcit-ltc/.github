@@ -27,15 +27,13 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
-
-      - name: Install Git LFS
-        run: |
-          git lfs install
+        with:
+          fetch-depth: 0
+          lfs: true
 
       - name: Run Semantic Release
         id: semrel
-        uses: docker://ghcr.io/codfish/semantic-release-action@sha256:5d5447090feb2f9252aac2825ef14e244ecf53528fbe87d585b459adb547b914
+        uses: docker://ghcr.io/bcit-ltc/semantic-release:latest
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
