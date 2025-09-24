@@ -10,8 +10,6 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
-  issues: write
 
 env:
   IMAGE_REPOSITORY: ghcr.io/${{ github.repository }}
@@ -22,6 +20,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      pull-requests: write
+      issues: write
     outputs:
       image: ${{ steps.vars.outputs.image }}
       is_release: ${{ steps.vars.outputs.is_release }}
