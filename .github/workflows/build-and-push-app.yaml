@@ -35,7 +35,7 @@ jobs:
 
       - name: Run Semantic Release
         id: semrel
-        uses: docker://ghcr.io/bcit-ltc/semantic-release@sha-6ba64a5df332130d98182e3aee931ec84aa35604
+        uses: docker://ghcr.io/bcit-ltc/semantic-release:sha-6ba64a5df332130d98182e3aee931ec84aa35604
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
