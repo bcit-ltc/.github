@@ -56,12 +56,19 @@ jobs:
           RELEASE_VERSION="${{ steps.semrel.outputs.release-version || '' }}"
 
           if [[ "${IS_RELEASE}" == "true" && -n "${RELEASE_VERSION}" ]]; then
+            # On a real release, use the exact version determined by semantic-release.
             VERSION="${RELEASE_VERSION}"
           else
-            # Base = latest tag (without 'v' prefix) or 0.0.0
-            RAW="$(git describe --tags --abbrev=0 2>/dev/null || true)"
-            BASE="${RAW#v}"; [[ -z "${BASE}" ]] && BASE="0.0.0"
-            VERSION="${BASE}-rc.${SHORT_SHA}.${TS}"
+            # For RCs: base off the latest STABLE tag (vX.Y.Z), ignoring prereleases.
+            RAW="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1 || true)"
+            BASE="${RAW#v}"
+            [[ -z "${BASE}" ]] && BASE="0.0.0"
+
+            IFS='.' read -r MAJ MIN PAT <<< "${BASE}"
+            NEXT_BASE="${MAJ}.${MIN}.$((PAT+1))"
+
+            # RC format ensures SemVer precedence by timestamp, then short SHA for traceability.
+            VERSION="${NEXT_BASE}-rc.${TS}.${SHORT_SHA}"
           fi
 
           {
