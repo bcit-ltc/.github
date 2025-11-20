@@ -7,6 +7,13 @@ on:
         required: true
       ORG_HELM_CHART_UPDATER_PRIVATE_KEY:
         required: true
+    outputs:
+      app_version:
+        description: "Computed app version from semantic-release"
+        value: ${{ jobs.get-version.outputs.version }}
+      app_image:
+        description: "Base image repository for this app"
+        value: ${{ jobs.get-version.outputs.image }}
 
 permissions:
   contents: read
