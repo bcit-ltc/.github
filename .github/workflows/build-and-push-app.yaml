@@ -41,7 +41,7 @@ env:
   CDN_CONTAINER: ${{ vars.CDN_CONTAINER }}
   CDN_NAMESPACE: ${{ vars.CDN_NAMESPACE }}
 
-  # Default asset extensions; overridable via inputs.cdn_asset_exts
+  # Default asset extensions; can be overridden per-call via inputs.cdn_asset_exts
   CDN_ASSET_EXTS_DEFAULT: jpg,png,js,css,ico
 
 jobs:
@@ -108,7 +108,7 @@ jobs:
             echo "version=${VERSION}"
           } | tee -a "$GITHUB_OUTPUT"
 
-  # 2. Build the image locally
+  # 2. Build image, optional CDN rewrite/upload, push & sign
   build-app-image:
     runs-on: ubuntu-latest
     needs: get-version
@@ -120,6 +120,14 @@ jobs:
       IS_RELEASE: ${{ needs.get-version.outputs.is_release }}
       APP_VERSION: ${{ needs.get-version.outputs.version }}
       IMAGE: ${{ needs.get-version.outputs.image }}
+
+      CDN_ACCOUNT_NAME: ${{ env.CDN_ACCOUNT_NAME }}
+      CDN_BASE_URL: ${{ env.CDN_BASE_URL }}
+      CDN_CONTAINER: ${{ env.CDN_CONTAINER }}
+      CDN_NAMESPACE: ${{ env.CDN_NAMESPACE }}
+
+      # If caller provided cdn_asset_exts, use it; else we'll fall back in-script
+      ASSET_EXTS: ${{ inputs.cdn_asset_exts }}
     outputs:
       tags: ${{ steps.meta.outputs.tags }}
     steps:
@@ -168,25 +176,14 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # 3. (Optional) CDN asset versioning + in-image rewrite + upload to Azure
-  cdn-rewrite-and-upload:
-    needs: [get-version, build-app-image]
-    if: ${{ inputs.cdn_enabled == true }}
-    runs-on: ubuntu-latest
-    env:
-      APP_VERSION: ${{ needs.get-version.outputs.version }}
-      IMAGE: ${{ needs.get-version.outputs.image }}
-
-      # If caller provided cdn_asset_exts, use it; else default
-      ASSET_EXTS: ${{ inputs.cdn_asset_exts }}
-    steps:
       - name: Validate CDN configuration
+        if: ${{ inputs.cdn_enabled }}
         shell: bash
         run: |
           set -euo pipefail
 
           if [[ -z "${CDN_ACCOUNT_NAME:-}" || -z "${CDN_CONTAINER:-}" || -z "${CDN_BASE_URL:-}" || -z "${CDN_NAMESPACE:-}" ]]; then
-            echo "CDN is enabled but one or more CDN_* inputs are missing."
+            echo "CDN is enabled but one or more CDN_* vars are missing."
             echo "CDN_ACCOUNT_NAME=${CDN_ACCOUNT_NAME:-<empty>}"
             echo "CDN_CONTAINER=${CDN_CONTAINER:-<empty>}"
             echo "CDN_BASE_URL=${CDN_BASE_URL:-<empty>}"
@@ -201,6 +198,7 @@ jobs:
           fi
 
       - name: Show local image
+        if: ${{ inputs.cdn_enabled }}
         shell: bash
         run: |
           set -euo pipefail
@@ -208,6 +206,7 @@ jobs:
           docker images "${IMAGE}"
 
       - name: Extract static files from runtime image
+        if: ${{ inputs.cdn_enabled }}
         shell: bash
         run: |
           set -euo pipefail
@@ -223,6 +222,7 @@ jobs:
           echo "CID=${CID}" >> "$GITHUB_ENV"
 
       - name: Compute CDN asset version
+        if: ${{ inputs.cdn_enabled }}
         id: cdn_asset_version
         shell: bash
         env:
@@ -279,6 +279,7 @@ jobs:
           echo "cdn_asset_version=${HASH}" >> "$GITHUB_OUTPUT"
 
       - name: Rewrite HTML asset URLs for CDN (Perl-based, in extracted site)
+        if: ${{ inputs.cdn_enabled }}
         shell: bash
         env:
           CDN_ASSET_VERSION: ${{ steps.cdn_asset_version.outputs.cdn_asset_version }}
@@ -343,6 +344,7 @@ jobs:
             done
 
       - name: Copy rewritten site back into container and commit
+        if: ${{ inputs.cdn_enabled }}
         shell: bash
         env:
           CID: ${{ env.CID }}
@@ -364,6 +366,7 @@ jobs:
           docker rm "${CID}"
 
       - name: Upload assets to CDN
+        if: ${{ inputs.cdn_enabled }}
         uses: azure/CLI@v2
         env:
           SAS_TOKEN: ${{ secrets.CDN_SAS_TOKEN }}
@@ -417,36 +420,16 @@ jobs:
             IFS="$OLD_IFS"
             echo "CDN upload complete."
 
-  # 4. Push the final image, then sign
-  push-and-sign-image:
-    runs-on: ubuntu-latest
-    needs: [get-version, build-app-image]
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
-    env:
-      APP_VERSION: ${{ needs.get-version.outputs.version }}
-      IMAGE: ${{ needs.get-version.outputs.image }}
-      IMAGE_TAGS: ${{ needs.build-app-image.outputs.tags }}
-    steps:
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      # ---- Push & sign ----
 
-      - name: Show tags to push
+      - name: Push all tags
         shell: bash
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
         run: |
           set -euo pipefail
           echo "Image tags to push:"
           printf '%s\n' ${IMAGE_TAGS}
-
-      - name: Push all tags
-        shell: bash
-        run: |
-          set -euo pipefail
           for tag in ${IMAGE_TAGS}; do
             echo "Pushing ${tag}"
             docker push "${tag}"
@@ -456,6 +439,8 @@ jobs:
 
       - name: Cosign sign by tag
         shell: bash
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
         run: |
           set -euo pipefail
           for tag in ${IMAGE_TAGS}; do
@@ -463,10 +448,10 @@ jobs:
             cosign sign --yes "${tag}"
           done
 
-  # 5. Trigger helm-charts repo remote-bump workflow to update chart version
+  # 3. Trigger helm-charts repo remote-bump workflow to update chart version
   dispatch-helm-charts:
     runs-on: ubuntu-latest
-    needs: [push-and-sign-image, get-version]
+    needs: [build-app-image, get-version]
     if: ${{ needs.get-version.outputs.version != '' }}
     steps:
 
