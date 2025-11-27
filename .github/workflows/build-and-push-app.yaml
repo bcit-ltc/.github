@@ -435,6 +435,33 @@ jobs:
             IFS="$OLD_IFS"
             echo "CDN upload complete."
 
+      - name: Normalize all tags to committed image
+        shell: bash
+        env:
+          IMAGE: ${{ env.IMAGE }}
+          APP_VERSION: ${{ env.APP_VERSION }}
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+
+          primary="${IMAGE}:${APP_VERSION}"
+
+          echo "Primary image (source for all tags): ${primary}"
+          docker image inspect "${primary}" > /dev/null 2>&1 || {
+            echo "Primary image ${primary} not found locally." >&2
+            exit 1
+          }
+
+          for tag in ${IMAGE_TAGS}; do
+            # tag is something like ghcr.io/bcit-ltc/infrastructure-documentation:latest
+            if [ "${tag}" = "${primary}" ]; then
+              continue
+            fi
+
+            echo "Retagging ${tag} to use the same image as ${primary}"
+            docker tag "${primary}" "${tag}"
+          done
+
       # ---- Push & sign ----
       - name: Push all tags
         shell: bash
