@@ -121,11 +121,6 @@ jobs:
       APP_VERSION: ${{ needs.get-version.outputs.version }}
       IMAGE: ${{ needs.get-version.outputs.image }}
 
-      CDN_ACCOUNT_NAME: ${{ env.CDN_ACCOUNT_NAME }}
-      CDN_BASE_URL: ${{ env.CDN_BASE_URL }}
-      CDN_CONTAINER: ${{ env.CDN_CONTAINER }}
-      CDN_NAMESPACE: ${{ env.CDN_NAMESPACE }}
-
       # If caller provided cdn_asset_exts, use it; else we'll fall back in-script
       ASSET_EXTS: ${{ inputs.cdn_asset_exts }}
     outputs:
@@ -175,6 +170,8 @@ jobs:
           sbom: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # ---- CDN steps ----
 
       - name: Validate CDN configuration
         if: ${{ inputs.cdn_enabled }}
