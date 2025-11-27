@@ -320,7 +320,7 @@ jobs:
                 my $exts = $ENV{EXT_PATTERN} // "";
                 exit 0 unless $cdn && $exts;
 
-                my $pat = qr{(src|href|data-src)=([\"\'])([^\"\']+\.($exts)(?:[#?][^\"\']*)?)\2}i;
+                my $pat = qr{(src|href|data-src)=(["\x27])([^"\x27]+\.($exts)(?:[#?][^"\x27]*)?)\2}i;
 
                 s{$pat}{
                   my ($attr, $q, $path) = ($1, $2, $3);
