@@ -121,7 +121,7 @@ jobs:
       APP_VERSION: ${{ needs.get-version.outputs.version }}
       IMAGE: ${{ needs.get-version.outputs.image }}
 
-      # If caller provided cdn_asset_exts, use it; else we'll fall back in-script
+      # If caller provided cdn_asset_exts, use it; else use default
       ASSET_EXTS: ${{ inputs.cdn_asset_exts }}
     outputs:
       tags: ${{ steps.meta.outputs.tags }}
@@ -172,7 +172,6 @@ jobs:
           cache-to: type=gha,mode=max
 
       # ---- CDN steps ----
-
       - name: Validate CDN configuration
         if: ${{ inputs.cdn_enabled }}
         shell: bash
@@ -394,6 +393,25 @@ jobs:
 
             PREFIX="${CDN_NAMESPACE}/${APP_NAME}/${CDN_ASSET_VERSION}"
 
+            echo "Checking if assets already exist at prefix ${PREFIX}..."
+
+            # If any blob exists under this prefix, assume this version has already been uploaded.
+            EXISTING_COUNT="$(
+              az storage blob list \
+                --account-name "${CDN_ACCOUNT_NAME}" \
+                --sas-token "${SAS_TOKEN}" \
+                --container-name "${CDN_CONTAINER}" \
+                --prefix "${PREFIX}/" \
+                --num-results 1 \
+                --query "length(@)" \
+                -o tsv
+            )"
+
+            if [ "${EXISTING_COUNT:-0}" != "0" ]; then
+              echo "Assets for prefix ${PREFIX} already exist (${EXISTING_COUNT}+ blob). Skipping upload."
+              exit 0
+            fi
+
             echo "Uploading assets from ${SRC_DIR} to container ${CDN_CONTAINER} at prefix ${PREFIX}"
             echo "Using asset extensions: ${ASSET_EXTS}"
 
@@ -418,7 +436,6 @@ jobs:
             echo "CDN upload complete."
 
       # ---- Push & sign ----
-
       - name: Push all tags
         shell: bash
         env:
