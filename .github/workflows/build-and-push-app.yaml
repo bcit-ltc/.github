@@ -24,10 +24,10 @@ on:
     outputs:
       app_version:
         description: "Computed app version from semantic-release"
-        value: ${{ jobs.get-version.outputs.version }}
+        value: ${{ jobs.build-app-image.outputs.version }}
       app_image:
         description: "Base image repository for this app"
-        value: ${{ jobs.get-version.outputs.image }}
+        value: ${{ jobs.build-app-image.outputs.image }}
 
 permissions:
   contents: read
@@ -46,23 +46,29 @@ env:
 
 jobs:
 
-  # 1. Compute version & base image name
-  get-version:
+  # Combined: compute version, build image, optional CDN rewrite/upload, push & sign
+  build-app-image:
     runs-on: ubuntu-latest
     permissions:
       contents: write
       pull-requests: write
       issues: write
+      packages: write
+      id-token: write
+    env:
+      # If caller provided cdn_asset_exts, use it; else use default
+      ASSET_EXTS: ${{ inputs.cdn_asset_exts }}
     outputs:
       image: ${{ steps.vars.outputs.image }}
       is_release: ${{ steps.vars.outputs.is_release }}
       version: ${{ steps.vars.outputs.version }}
+      tags: ${{ steps.meta.outputs.tags }}
 
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          lfs: true
+          lfs: false
 
       - name: Run Semantic Release
         id: semrel
@@ -108,27 +114,9 @@ jobs:
             echo "version=${VERSION}"
           } | tee -a "$GITHUB_OUTPUT"
 
-  # 2. Build image, optional CDN rewrite/upload, push & sign
-  build-app-image:
-    runs-on: ubuntu-latest
-    needs: get-version
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
-    env:
-      IS_RELEASE: ${{ needs.get-version.outputs.is_release }}
-      APP_VERSION: ${{ needs.get-version.outputs.version }}
-      IMAGE: ${{ needs.get-version.outputs.image }}
-
-      # If caller provided cdn_asset_exts, use it; else use default
-      ASSET_EXTS: ${{ inputs.cdn_asset_exts }}
-    outputs:
-      tags: ${{ steps.meta.outputs.tags }}
-    steps:
-      - uses: actions/checkout@v4
-
       - name: Write VERSION file for build
+        env:
+          APP_VERSION: ${{ steps.vars.outputs.version }}
         run: echo "${APP_VERSION}" > VERSION
 
       - uses: docker/login-action@v3
@@ -145,11 +133,11 @@ jobs:
         env:
           DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
         with:
-          images: ${{ env.IMAGE }}
+          images: ${{ steps.vars.outputs.image }}
           tags: |
-            type=raw,value=${{ env.APP_VERSION }}
-            type=semver,pattern={{major}}.{{minor}},enable=${{ env.IS_RELEASE == 'true' }}
-            type=raw,value=stable,enable=${{ env.IS_RELEASE == 'true' }}
+            type=raw,value=${{ steps.vars.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ steps.vars.outputs.is_release == 'true' }}
+            type=raw,value=stable,enable=${{ steps.vars.outputs.is_release == 'true' }}
           flavor: |
             latest=true
 
@@ -193,17 +181,12 @@ jobs:
             echo "ASSET_EXTS=${CDN_ASSET_EXTS_DEFAULT}" >> "$GITHUB_ENV"
           fi
 
-      - name: Show local image
-        if: ${{ inputs.cdn_enabled }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "Local images for ${IMAGE}:"
-          docker images "${IMAGE}"
-
       - name: Extract static files from runtime image
         if: ${{ inputs.cdn_enabled }}
         shell: bash
+        env:
+          IMAGE: ${{ steps.vars.outputs.image }}
+          APP_VERSION: ${{ steps.vars.outputs.version }}
         run: |
           set -euo pipefail
 
@@ -252,24 +235,26 @@ jobs:
             exit 0
           fi
 
-          ASSET_FILES="$(
-            eval "find \"${SRC_DIR}\" -type f \\( ${FIND_EXPR} \\) -print0" | tr '\0' '\n' || true
-          )"
-
-          if [ -z "${ASSET_FILES}" ]; then
-            echo "No matching asset files in ${SRC_DIR}; using fallback CDN asset version." >&2
-            VERSION="noassets000000"
-            echo "cdn_asset_version=${VERSION}" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          TMP="$(mktemp)"
 
           HASH="$(
             eval "find \"${SRC_DIR}\" -type f \\( ${FIND_EXPR} \\) -print0" \
+              | tee "$TMP" \
               | sort -z \
-              | xargs -0 sha256sum \
-              | sha256sum \
+              | xargs -0 sha256sum 2>/dev/null \
+              | sha256sum 2>/dev/null \
               | cut -c1-12
           )"
+
+          if [ ! -s "${TMP}" ]; then
+            echo "No matching asset files in ${SRC_DIR}; using fallback CDN asset version." >&2
+            VERSION="noassets000000"
+            echo "cdn_asset_version=${VERSION}" >> "$GITHUB_OUTPUT"
+            rm -f "${TMP}"
+            exit 0
+          fi
+
+          rm -f "${TMP}"
 
           echo "Computed CDN asset version from assets: ${HASH}"
           echo "cdn_asset_version=${HASH}" >> "$GITHUB_OUTPUT"
@@ -344,6 +329,8 @@ jobs:
         shell: bash
         env:
           CID: ${{ env.CID }}
+          IMAGE: ${{ steps.vars.outputs.image }}
+          APP_VERSION: ${{ steps.vars.outputs.version }}
         run: |
           set -euo pipefail
           if [ -z "${CID:-}" ]; then
@@ -438,8 +425,8 @@ jobs:
       - name: Normalize all tags to committed image
         shell: bash
         env:
-          IMAGE: ${{ env.IMAGE }}
-          APP_VERSION: ${{ env.APP_VERSION }}
+          IMAGE: ${{ steps.vars.outputs.image }}
+          APP_VERSION: ${{ steps.vars.outputs.version }}
           IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
         run: |
           set -euo pipefail
@@ -516,11 +503,11 @@ jobs:
             cosign sign --yes "${digest}"
           done
 
-  # 3. Trigger helm-charts repo remote-bump workflow to update chart version
+  # Trigger helm-charts repo remote-bump workflow to update chart version
   dispatch-helm-charts:
     runs-on: ubuntu-latest
-    needs: [build-app-image, get-version]
-    if: ${{ needs.get-version.outputs.version != '' }}
+    needs: [build-app-image]
+    if: ${{ needs.build-app-image.outputs.version != '' }}
     steps:
 
       # Generate token to trigger remote workflow
@@ -538,7 +525,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           CHART: ${{ github.event.repository.name }}
-          VER: ${{ needs.get-version.outputs.version }}
+          VER: ${{ needs.build-app-image.outputs.version }}
         run: |
           set -euo pipefail
           gh workflow run remote-bump.yaml \
