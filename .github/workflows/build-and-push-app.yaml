@@ -13,7 +13,14 @@ on:
         description: "Comma-separated list of asset extensions"
         required: false
         type: string
-        default: ""   # falls back to env default
+        default: ""   # we'll fall back to a global default
+    secrets:
+      ORG_HELM_CHART_UPDATER_ID:
+        required: true
+      ORG_HELM_CHART_UPDATER_PRIVATE_KEY:
+        required: true
+      CDN_SAS_TOKEN:
+        required: false  # only needed when CDN is actually enabled
     outputs:
       app_version:
         description: "Computed app version from semantic-release"
@@ -163,21 +170,15 @@ jobs:
 
   # 3. (Optional) CDN asset versioning + in-image rewrite + upload to Azure
   cdn-rewrite-and-upload:
-    needs: build-app-image
+    needs: [get-version, build-app-image]
     if: ${{ inputs.cdn_enabled == true }}
     runs-on: ubuntu-latest
     env:
-      APP_VERSION: ${{ needs.build-image.outputs.app_version }}
-      IMAGE: ${{ needs.build-image.outputs.app_image }}
-
-      CDN_ACCOUNT_NAME: ${{ env.CDN_ACCOUNT_NAME }}
-      CDN_BASE_URL: ${{ env.CDN_BASE_URL }}
-      CDN_CONTAINER: ${{ env.CDN_CONTAINER }}
-      CDN_NAMESPACE: ${{ env.CDN_NAMESPACE }}
+      APP_VERSION: ${{ needs.get-version.outputs.version }}
+      IMAGE: ${{ needs.get-version.outputs.image }}
 
       # If caller provided cdn_asset_exts, use it; else default
-      ASSET_EXTS: ${{ inputs.cdn_asset_exts != '' && inputs.cdn_asset_exts || env.CDN_ASSET_EXTS_DEFAULT }}
-
+      ASSET_EXTS: ${{ inputs.cdn_asset_exts }}
     steps:
       - name: Validate CDN configuration
         shell: bash
@@ -419,7 +420,7 @@ jobs:
   # 4. Push the final image, then sign
   push-and-sign-image:
     runs-on: ubuntu-latest
-    needs: [get-version, build-app-image, cdn-rewrite-and-upload]
+    needs: [get-version, build-app-image]
     permissions:
       contents: read
       packages: write
