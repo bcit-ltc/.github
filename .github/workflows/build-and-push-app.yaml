@@ -5,39 +5,15 @@ on:
     inputs:
       # ---- CDN (optional, opt-in) ----
       cdn_enabled:
-        description: "Enable CDN asset rewrite + upload"
+        description: "Enable CDN URL rewrite + asset upload"
         required: false
         type: boolean
         default: false
-      cdn_account_name:
-        description: "Azure Storage account name for CDN"
-        required: false
-        type: string
-      cdn_container:
-        description: "Azure Storage container name (e.g., 'cdn')"
-        required: false
-        type: string
-      cdn_base_url:
-        description: "Base URL for the storage endpoint (e.g. https://account.blob.core.windows.net/)"
-        required: false
-        type: string
-      cdn_namespace:
-        description: "Namespace under the container (e.g. 'bcit-ltc')"
-        required: false
-        type: string
       cdn_asset_exts:
-        description: "Comma-separated asset extensions for versioning & rewrite (no dots)"
+        description: "Comma-separated list of asset extensions"
         required: false
         type: string
-        default: "jpg,png,js,css,ico"
-    secrets:
-      ORG_HELM_CHART_UPDATER_ID:
-        required: true
-      ORG_HELM_CHART_UPDATER_PRIVATE_KEY:
-        required: true
-      # Optional: required only if CDN is enabled
-      CDN_SAS_TOKEN:
-        required: false
+        default: ""   # falls back to env default
     outputs:
       app_version:
         description: "Computed app version from semantic-release"
@@ -51,6 +27,15 @@ permissions:
 
 env:
   IMAGE_REPOSITORY: ghcr.io/${{ github.repository }}
+
+  # Org-level CDN config (from org or repo variables)
+  CDN_ACCOUNT_NAME: ${{ vars.CDN_ACCOUNT_NAME }}
+  CDN_BASE_URL: ${{ vars.CDN_BASE_URL }}
+  CDN_CONTAINER: ${{ vars.CDN_CONTAINER }}
+  CDN_NAMESPACE: ${{ vars.CDN_NAMESPACE }}
+
+  # Default asset extensions; overridable via inputs.cdn_asset_exts
+  CDN_ASSET_EXTS_DEFAULT: jpg,png,js,css,ico
 
 jobs:
 
@@ -116,7 +101,7 @@ jobs:
             echo "version=${VERSION}"
           } | tee -a "$GITHUB_OUTPUT"
 
-  # 2. Build the image locally (no push yet)
+  # 2. Build the image locally
   build-app-image:
     runs-on: ubuntu-latest
     needs: get-version
@@ -178,17 +163,21 @@ jobs:
 
   # 3. (Optional) CDN asset versioning + in-image rewrite + upload to Azure
   cdn-rewrite-and-upload:
-    runs-on: ubuntu-latest
-    needs: [get-version, build-app-image]
+    needs: build-app-image
     if: ${{ inputs.cdn_enabled == true }}
+    runs-on: ubuntu-latest
     env:
-      APP_VERSION: ${{ needs.get-version.outputs.version }}
-      IMAGE: ${{ needs.get-version.outputs.image }}
-      CDN_ACCOUNT_NAME: ${{ inputs.cdn_account_name }}
-      CDN_CONTAINER: ${{ inputs.cdn_container }}
-      CDN_BASE_URL: ${{ inputs.cdn_base_url }}
-      CDN_NAMESPACE: ${{ inputs.cdn_namespace }}
-      ASSET_EXTS: ${{ inputs.cdn_asset_exts }}
+      APP_VERSION: ${{ needs.build-image.outputs.app_version }}
+      IMAGE: ${{ needs.build-image.outputs.app_image }}
+
+      CDN_ACCOUNT_NAME: ${{ env.CDN_ACCOUNT_NAME }}
+      CDN_BASE_URL: ${{ env.CDN_BASE_URL }}
+      CDN_CONTAINER: ${{ env.CDN_CONTAINER }}
+      CDN_NAMESPACE: ${{ env.CDN_NAMESPACE }}
+
+      # If caller provided cdn_asset_exts, use it; else default
+      ASSET_EXTS: ${{ inputs.cdn_asset_exts != '' && inputs.cdn_asset_exts || env.CDN_ASSET_EXTS_DEFAULT }}
+
     steps:
       - name: Validate CDN configuration
         shell: bash
@@ -206,8 +195,8 @@ jobs:
           fi
 
           if [[ -z "${ASSET_EXTS:-}" ]]; then
-            echo "ASSET_EXTS is empty; using default jpg,png,js,css,ico"
-            echo "ASSET_EXTS=jpg,png,js,css,ico" >> "$GITHUB_ENV"
+            echo "ASSET_EXTS is empty; using default ${CDN_ASSET_EXTS_DEFAULT}"
+            echo "ASSET_EXTS=${CDN_ASSET_EXTS_DEFAULT}" >> "$GITHUB_ENV"
           fi
 
       - name: Show local image
@@ -324,6 +313,7 @@ jobs:
 
           export CDN_PREFIX EXT_PATTERN
 
+          # For each HTML file, rewrite asset URLs to use the CDN prefix if they match the configured extensions
           find site -type f -name '*.html' -print0 |
             while IFS= read -r -d '' f; do
               perl -0pi -e '
@@ -426,7 +416,7 @@ jobs:
             IFS="$OLD_IFS"
             echo "CDN upload complete."
 
-  # 4. Push the final image (rewritten if CDN ran), then sign
+  # 4. Push the final image, then sign
   push-and-sign-image:
     runs-on: ubuntu-latest
     needs: [get-version, build-app-image, cdn-rewrite-and-upload]
