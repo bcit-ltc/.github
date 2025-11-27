@@ -451,15 +451,24 @@ jobs:
 
       - uses: sigstore/cosign-installer@v3
 
-      - name: Cosign sign by tag
+      - name: Cosign sign by digest
         shell: bash
         env:
           IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
         run: |
           set -euo pipefail
           for tag in ${IMAGE_TAGS}; do
-            echo "Signing ${tag}"
-            cosign sign --yes "${tag}"
+            # Resolve the pushed tag to its digest-based reference, e.g.
+            # ghcr.io/bcit-ltc/infrastructure-documentation@sha256:abcd...
+            digest_ref="$(docker inspect --format='{{index .RepoDigests 0}}' "${tag}")"
+
+            if [ -z "${digest_ref}" ]; then
+              echo "Unable to resolve digest for ${tag}" >&2
+              exit 1
+            fi
+
+            echo "Signing ${digest_ref} (derived from ${tag})"
+            cosign sign --yes "${digest_ref}"
           done
 
   # 3. Trigger helm-charts repo remote-bump workflow to update chart version
