@@ -42,7 +42,7 @@ env:
   CDN_NAMESPACE: ${{ vars.CDN_NAMESPACE }}
 
   # Default asset extensions; can be overridden per-call via inputs.cdn_asset_exts
-  CDN_ASSET_EXTS_DEFAULT: jpg,png,js,css,ico
+  CDN_ASSET_EXTS_DEFAULT: jpg,jpeg,png,webp,gif,svg,ico,mp4,webm,mp3,ogg,woff,woff2,ttf,otf,css,js,map
 
 jobs:
 
