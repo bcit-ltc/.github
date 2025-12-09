@@ -297,7 +297,7 @@ jobs:
           # Make CDN_PREFIX and EXT_PATTERN available to Perl
           export CDN_PREFIX EXT_PATTERN
 
-          # For each HTML file, rewrite asset URLs relative to that file's directory
+          # For each HTML file, rewrite asset URLs relative to that file directory
           find site -type f -name '*.html' -print0 |
             while IFS= read -r -d '' f; do
               # Directory of this HTML file relative to site/ (e.g. "multimedia/_SOH/3DBirth")
@@ -328,7 +328,7 @@ jobs:
                       # Root-relative: drop leading slash so it is relative to site/ root
                       $p =~ s{^/}{};
                     } else {
-                      # Relative to this HTML file's directory
+                      # Relative to this HTML file directory
                       $p = $dir ? "$dir/$p" : $p;
                     }
 
