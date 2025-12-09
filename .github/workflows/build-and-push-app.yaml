@@ -294,6 +294,9 @@ jobs:
           echo "Rewriting HTML assets to CDN prefix: ${CDN_PREFIX}"
           echo "Matching extensions: ${ASSET_EXTS}"
 
+          # Make CDN_PREFIX and EXT_PATTERN available to Perl
+          export CDN_PREFIX EXT_PATTERN
+
           # For each HTML file, rewrite asset URLs relative to that file's directory
           find site -type f -name '*.html' -print0 |
             while IFS= read -r -d '' f; do
@@ -301,23 +304,18 @@ jobs:
               rel="${f#site/}"
               rel_dir="$(dirname "$rel")"
 
-              CDN_PREFIX_ENV="${CDN_PREFIX}"
-              EXT_PATTERN_ENV="${EXT_PATTERN}"
-              HTML_DIR_ENV="${rel_dir}"
-
-              CDN_PREFIX="$CDN_PREFIX_ENV" EXT_PATTERN="$EXT_PATTERN_ENV" HTML_DIR="$HTML_DIR_ENV" \
-              perl -0pi -e '
-                my $cdn  = $ENV{CDN_PREFIX}  // "";
-                my $exts = $ENV{EXT_PATTERN} // "";
-                my $dir  = $ENV{HTML_DIR}    // "";
+              HTML_DIR="$rel_dir" perl -0pi -e '
+                my $cdn  = $ENV{CDN_PREFIX}  // q{};
+                my $exts = $ENV{EXT_PATTERN} // q{};
+                my $dir  = $ENV{HTML_DIR}    // q{};
                 exit 0 unless $cdn && $exts;
 
-                my $pat = qr{(src|href|data-src)=(["\x27])([^"\x27]+\.($exts)(?:[#?][^"\x27]*)?)\2}i;
+                my $pat = qr{(src|href|data-src)=(["\x27])([^"\x27]+\.(?:$exts)(?:[#?][^"\x27]*)?)\2}i;
 
                 s{$pat}{
                   my ($attr, $q, $path) = ($1, $2, $3);
 
-                  # Absolute URL (has scheme or is protocol-relative) -> leave unchanged
+                  # Absolute URL (scheme or protocol-relative) -> leave unchanged
                   if ($path =~ m{^(?:[a-zA-Z][a-zA-Z0-9+.+-]*:|//)}) {
                     "$attr=$q$path$q";
                   } else {
@@ -333,9 +331,6 @@ jobs:
                       # Relative to this HTML file's directory
                       $p = $dir ? "$dir/$p" : $p;
                     }
-
-                    # Optionally collapse "foo/../" segments
-                    1 while $p =~ s{[^/]+/\.\./}{};
 
                     "$attr=$q$cdn/$p$q";
                   }
