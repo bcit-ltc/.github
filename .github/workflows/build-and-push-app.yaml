@@ -325,12 +325,14 @@ jobs:
                     $p =~ s{^\./}{};
 
                     if ($p =~ m{^/}) {
-                      # Root-relative: drop leading slash so it is relative to site/ root
+                      # Root-relative: drop leading slash
                       $p =~ s{^/}{};
                     } else {
                       # Relative to this HTML file directory
                       $p = $dir ? "$dir/$p" : $p;
                     }
+
+                    print STDERR "[CDN-REWRITE] $path -> $cdn/$p\n";
 
                     "$attr=$q$cdn/$p$q";
                   }
