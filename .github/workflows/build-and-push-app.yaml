@@ -72,22 +72,7 @@ jobs:
 
       - name: Run Semantic Release
         id: semrel
-        uses: codfish/semantic-release-action@v4
-        with:
-          branches: |
-            [
-              "main",
-              {
-                "name": "beta",
-                "prerelease": true
-              }
-            ]
-          plugins: |
-            [
-              "@semantic-release/commit-analyzer",
-              "@semantic-release/release-notes-generator",
-              "@semantic-release/github"
-            ]
+        uses: docker://ghcr.io/codfish/semantic-release-action@sha256:327a3ce08284f9dd9b83b607e3f668dae90139e68ce90780b0a43a09d577dc3a
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
