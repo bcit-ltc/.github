@@ -71,7 +71,7 @@ jobs:
           lfs: false
 
       - name: Run Semantic Release
-        uses: codfish/semantic-release-action@v4
+        uses: docker://ghcr.io/codfish/semantic-release-action@sha256:327a3ce08284f9dd9b83b607e3f668dae90139e68ce90780b0a43a09d577dc3a
         id: semrel
         with:
           additional-packages: |
