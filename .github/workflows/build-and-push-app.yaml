@@ -71,20 +71,8 @@ jobs:
           lfs: false
 
       - name: Run Semantic Release
-        uses: docker://ghcr.io/codfish/semantic-release-action@sha256:327a3ce08284f9dd9b83b607e3f668dae90139e68ce90780b0a43a09d577dc3a
+        uses: docker://ghcr.io/bcit-ltc/semantic-release@sha256:0beb21eb0ea8a30aca7e6ef94d2b0ae884168145
         id: semrel
-        with:
-          additional_packages: |
-            [
-              "@semantic-release/git"
-            ]
-          plugins: |
-            [
-              '@semantic-release/commit-analyzer',
-              '@semantic-release/release-notes-generator',
-              '@semantic-release/github',
-              '@semantic-release/git'
-            ]
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
