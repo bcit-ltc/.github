@@ -73,6 +73,13 @@ jobs:
       - name: Run Semantic Release
         uses: docker://ghcr.io/bcit-ltc/semantic-release@sha256:09e38770f235748dd9dd08d7b1dfc1ed734ba8fb9b24787721cfc007e1cd6ea6
         id: semrel
+        with:
+          plugins: |
+            [
+              '@semantic-release/commit-analyzer',
+              '@semantic-release/release-notes-generator',
+              '@semantic-release/github'
+            ]
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
