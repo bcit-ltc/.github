@@ -71,7 +71,7 @@ jobs:
           lfs: false
 
       - name: Run Semantic Release
-        uses: docker://ghcr.io/bcit-ltc/semantic-release@sha256:0beb21eb0ea8a30aca7e6ef94d2b0ae884168145
+        uses: docker://ghcr.io/bcit-ltc/semantic-release@sha256:09e38770f235748dd9dd08d7b1dfc1ed734ba8fb9b24787721cfc007e1cd6ea6
         id: semrel
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
