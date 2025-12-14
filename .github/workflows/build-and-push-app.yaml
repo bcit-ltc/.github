@@ -71,7 +71,7 @@ jobs:
           lfs: false
 
       - name: Run Semantic Release
-        uses: docker://ghcr.io/bcit-ltc/semantic-release@sha256:09e38770f235748dd9dd08d7b1dfc1ed734ba8fb9b24787721cfc007e1cd6ea6
+        uses: docker://ghcr.io/bcit-ltc/semantic-release@sha256:68044c448b74fa98dd257eca88a45b5cdcf9c269e20215193e47bc8326ddf1e6
         id: semrel
         with:
           plugins: |
