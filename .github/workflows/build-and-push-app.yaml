@@ -344,6 +344,169 @@ jobs:
               ' "$f"
             done
 
+      - name: Rewrite CSS asset URLs for CDN (Perl-based, in extracted site)
+        if: ${{ inputs.cdn_enabled }}
+        shell: bash
+        env:
+          CDN_ASSET_VERSION: ${{ steps.cdn_asset_version.outputs.cdn_asset_version }}
+          CDN_BASE_URL: ${{ env.CDN_BASE_URL }}
+          CDN_CONTAINER: ${{ env.CDN_CONTAINER }}
+          CDN_NAMESPACE: ${{ env.CDN_NAMESPACE }}
+          ASSET_EXTS: ${{ env.ASSET_EXTS }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${CDN_ASSET_VERSION}" ]; then
+            echo "CDN_ASSET_VERSION is empty; skipping CSS rewrite." >&2
+            exit 0
+          fi
+
+          if [ -z "${CDN_BASE_URL}" ] || [ -z "${CDN_CONTAINER}" ]; then
+            echo "CDN_BASE_URL or CDN_CONTAINER is not set; skipping CSS rewrite." >&2
+            exit 0
+          fi
+
+          APP_NAME="${{ github.event.repository.name }}"
+          CDN_PREFIX="${CDN_BASE_URL%/}/${CDN_CONTAINER}/${CDN_NAMESPACE}/${APP_NAME}/${CDN_ASSET_VERSION}"
+
+          EXT_PATTERN="$(printf '%s' "${ASSET_EXTS}" | tr -d '[:space:]' | sed 's/,/|/g')"
+
+          if [ -z "${EXT_PATTERN}" ]; then
+            echo "No valid extensions in ASSET_EXTS; skipping CSS rewrite." >&2
+            exit 0
+          fi
+
+          echo "Rewriting CSS assets to CDN prefix: ${CDN_PREFIX}"
+          echo "Matching extensions: ${ASSET_EXTS}"
+
+          export CDN_PREFIX EXT_PATTERN
+
+          find site -type f -name '*.css' -print0 |
+            while IFS= read -r -d '' f; do
+              rel="${f#site/}"
+              rel_dir="$(dirname "$rel")"
+              if [ "${rel_dir}" = "." ]; then
+                rel_dir=""
+              fi
+
+              CSS_DIR="$rel_dir" perl -0pi -e '
+                my $cdn  = $ENV{CDN_PREFIX}  // q{};
+                my $exts = $ENV{EXT_PATTERN} // q{};
+                my $dir  = $ENV{CSS_DIR}     // q{};
+                exit 0 unless $cdn && $exts;
+
+                my $is_abs = sub {
+                  my ($p) = @_;
+                  return $p =~ m{^(?:[a-zA-Z][a-zA-Z0-9+.+-]*:|//|data:)}i;
+                };
+
+                my $rewrite = sub {
+                  my ($path) = @_;
+                  return $path if $is_abs->($path);
+                  my $p = $path;
+                  $p =~ s{^\./}{};
+                  if ($p =~ m{^/}) {
+                    $p =~ s{^/}{};
+                  } else {
+                    $p = $dir ? "$dir/$p" : $p;
+                  }
+                  return "$cdn/$p";
+                };
+
+                my $url_pat = qr{url\(\s*([\"\x27]?)([^\"\x27\)]+\.(?:$exts)(?:[#?][^\"\x27\)]*)?)\1\s*\)}i;
+                s{$url_pat}{
+                  my ($q, $path) = ($1, $2);
+                  my $new = $rewrite->($path);
+                  "url(" . ($q // q{}) . $new . ($q // q{}) . ")";
+                }eg;
+
+                my $import_pat = qr{\@import\s+(?:url\()?([\"\x27]?)([^\"\x27\)]+\.(?:$exts)(?:[#?][^\"\x27\)]*)?)\1\)?}i;
+                s{$import_pat}{
+                  my ($q, $path) = ($1, $2);
+                  my $new = $rewrite->($path);
+                  "\@import " . ($q // q{}) . $new . ($q // q{}) . "";
+                }eg;
+              ' "$f"
+            done
+
+      - name: Rewrite JS asset URLs for CDN (Perl-based, in extracted site)
+        if: ${{ inputs.cdn_enabled }}
+        shell: bash
+        env:
+          CDN_ASSET_VERSION: ${{ steps.cdn_asset_version.outputs.cdn_asset_version }}
+          CDN_BASE_URL: ${{ env.CDN_BASE_URL }}
+          CDN_CONTAINER: ${{ env.CDN_CONTAINER }}
+          CDN_NAMESPACE: ${{ env.CDN_NAMESPACE }}
+          ASSET_EXTS: ${{ env.ASSET_EXTS }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${CDN_ASSET_VERSION}" ]; then
+            echo "CDN_ASSET_VERSION is empty; skipping JS rewrite." >&2
+            exit 0
+          fi
+
+          if [ -z "${CDN_BASE_URL}" ] || [ -z "${CDN_CONTAINER}" ]; then
+            echo "CDN_BASE_URL or CDN_CONTAINER is not set; skipping JS rewrite." >&2
+            exit 0
+          fi
+
+          APP_NAME="${{ github.event.repository.name }}"
+          CDN_PREFIX="${CDN_BASE_URL%/}/${CDN_CONTAINER}/${CDN_NAMESPACE}/${APP_NAME}/${CDN_ASSET_VERSION}"
+
+          EXT_PATTERN="$(printf '%s' "${ASSET_EXTS}" | tr -d '[:space:]' | sed 's/,/|/g')"
+
+          if [ -z "${EXT_PATTERN}" ]; then
+            echo "No valid extensions in ASSET_EXTS; skipping JS rewrite." >&2
+            exit 0
+          fi
+
+          echo "Rewriting JS assets to CDN prefix: ${CDN_PREFIX}"
+          echo "Matching extensions: ${ASSET_EXTS}"
+
+          export CDN_PREFIX EXT_PATTERN
+
+          find site -type f -name '*.js' -print0 |
+            while IFS= read -r -d '' f; do
+              rel="${f#site/}"
+              rel_dir="$(dirname "$rel")"
+              if [ "${rel_dir}" = "." ]; then
+                rel_dir=""
+              fi
+
+              JS_DIR="$rel_dir" perl -0pi -e '
+                my $cdn  = $ENV{CDN_PREFIX}  // q{};
+                my $exts = $ENV{EXT_PATTERN} // q{};
+                my $dir  = $ENV{JS_DIR}      // q{};
+                exit 0 unless $cdn && $exts;
+
+                my $is_abs = sub {
+                  my ($p) = @_;
+                  return $p =~ m{^(?:[a-zA-Z][a-zA-Z0-9+.+-]*:|//|data:)}i;
+                };
+
+                my $rewrite = sub {
+                  my ($path) = @_;
+                  return $path if $is_abs->($path);
+                  my $p = $path;
+                  $p =~ s{^\./}{};
+                  if ($p =~ m{^/}) {
+                    $p =~ s{^/}{};
+                  } else {
+                    $p = $dir ? "$dir/$p" : $p;
+                  }
+                  return "$cdn/$p";
+                };
+
+                my $str_pat = qr{([\"\x27])([^\"\x27]+?\.(?:$exts)(?:[#?][^\"\x27]*)?)\1}i;
+                s{$str_pat}{
+                  my ($q, $path) = ($1, $2);
+                  my $new = $rewrite->($path);
+                  $q . $new . $q;
+                }eg;
+              ' "$f"
+            done
+
       - name: Copy rewritten site back into container and commit
         if: ${{ inputs.cdn_enabled }}
         shell: bash
