@@ -1,0 +1,665 @@
+name: Build and push app/chart images
+
+on:
+  workflow_call:
+    inputs:
+      # ---- CDN (optional, opt-in) ----
+      cdn_enabled:
+        description: "Enable CDN URL rewrite + asset upload"
+        required: false
+        type: boolean
+        default: false
+      cdn_asset_exts:
+        description: "Comma-separated list of asset extensions"
+        required: false
+        type: string
+        default: "" # we'll fall back to a global default
+    secrets:
+      ORG_HELM_CHART_UPDATER_ID:
+        required: true
+      ORG_HELM_CHART_UPDATER_PRIVATE_KEY:
+        required: true
+      CDN_SAS_TOKEN:
+        required: false # only needed when CDN is actually enabled
+    outputs:
+      app_version:
+        description: "Computed app version from semantic-release"
+        value: ${{ jobs.build-app-image.outputs.version }}
+      app_image:
+        description: "Base image repository for this app"
+        value: ${{ jobs.build-app-image.outputs.image }}
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_REPOSITORY: ghcr.io/${{ github.repository }}
+
+  # Org-level CDN config (from org or repo variables)
+  CDN_ACCOUNT_NAME: ${{ vars.CDN_ACCOUNT_NAME }}
+  CDN_BASE_URL: ${{ vars.CDN_BASE_URL }}
+  CDN_CONTAINER: ${{ vars.CDN_CONTAINER }}
+  CDN_NAMESPACE: ${{ vars.CDN_NAMESPACE }}
+
+  # Default asset extensions; can be overridden per-call via inputs.cdn_asset_exts
+  CDN_ASSET_EXTS_DEFAULT: jpg,jpeg,png,webp,gif,svg,ico,mp4,webm,mp3,ogg,woff,woff2,ttf,otf,css,js,map
+
+jobs:
+  # Combined: compute version, build image, optional CDN rewrite/upload, push & sign
+  build-app-image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      packages: write
+      id-token: write
+    env:
+      # If caller provided cdn_asset_exts, use it; else use default
+      ASSET_EXTS: ${{ inputs.cdn_asset_exts }}
+      # Static file path in runtime container
+      RUNTIME_STATIC_ROOT: /usr/share/nginx/html
+    outputs:
+      image: ${{ steps.vars.outputs.image }}
+      app_name: ${{ steps.vars.outputs.app_name }}
+      is_release: ${{ steps.vars.outputs.is_release }}
+      version: ${{ steps.vars.outputs.version }}
+      tags: ${{ steps.meta.outputs.tags }}
+
+    steps:
+      # ============================================================================
+      # VERSION & BUILD STEPS
+      # ============================================================================
+
+      # Checkout repository with full history for semantic versioning
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: false
+
+      # Analyze commits and determine if a new release should be published
+      - name: Run Semantic Release
+        uses: docker://ghcr.io/bcit-ltc/semantic-release@sha256:68044c448b74fa98dd257eca88a45b5cdcf9c269e20215193e47bc8326ddf1e6
+        id: semrel
+        with:
+          plugins: |
+            [
+              '@semantic-release/commit-analyzer',
+              '@semantic-release/release-notes-generator',
+              '@semantic-release/github'
+            ]
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Compute version (release or RC) and app metadata for image tagging
+      - name: Compute version
+        id: vars
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMAGE="${IMAGE_REPOSITORY,,}"
+          APP_NAME="${GITHUB_REPOSITORY##*/}"
+          SHORT_SHA="${GITHUB_SHA::7}"
+          TS="$(date -u +%Y%m%d%H%M%S)"
+
+          # From semantic-release
+          IS_RELEASE="${{ steps.semrel.outputs.new-release-published || 'false' }}"
+          RELEASE_VERSION="${{ steps.semrel.outputs.release-version || '' }}"
+
+          if [[ "${IS_RELEASE}" == "true" && -n "${RELEASE_VERSION}" ]]; then
+            # On a real release, use the exact version determined by semantic-release.
+            VERSION="${RELEASE_VERSION}"
+          else
+            # For RCs: base off the latest STABLE tag (vX.Y.Z), ignoring prereleases.
+            RAW="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1 || true)"
+            BASE="${RAW#v}"
+            [[ -z "${BASE}" ]] && BASE="0.0.0"
+
+            IFS='.' read -r MAJ MIN PAT <<< "${BASE}"
+            NEXT_BASE="${MAJ}.${MIN}.$((PAT+1))"
+
+            # RC format ensures SemVer precedence by timestamp, then short SHA for traceability.
+            VERSION="${NEXT_BASE}-rc.${TS}.${SHORT_SHA}"
+          fi
+
+          {
+            echo "image=${IMAGE}"
+            echo "app_name=${APP_NAME}"
+            echo "is_release=${IS_RELEASE}"
+            echo "version=${VERSION}"
+          } | tee -a "$GITHUB_OUTPUT"
+
+      # Write VERSION file to include in container image
+      - name: Write VERSION file for build
+        env:
+          APP_VERSION: ${{ steps.vars.outputs.version }}
+        run: echo "${APP_VERSION}" > VERSION
+
+      # Authenticate with GitHub Container Registry
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Configure Docker Buildx for multi-platform builds and caching
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Generate Docker tags, labels, and annotations for the image
+      - name: Generate container metadata
+        id: meta
+        uses: docker/metadata-action@9ec57ed1fcdbf14dcef7dfbe97b2010124a938b7
+        env:
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
+        with:
+          images: ${{ steps.vars.outputs.image }}
+          tags: |
+            type=raw,value=${{ steps.vars.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ steps.vars.outputs.is_release == 'true' }}
+            type=raw,value=stable,enable=${{ steps.vars.outputs.is_release == 'true' }}
+          flavor: |
+            latest=true
+
+      # Build container image and load into local Docker (not pushed in case CDN rewrites needed)
+      - name: Build image
+        id: build
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: false
+          DOCKER_BUILD_SUMMARY: false
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          provenance: false
+          sbom: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ============================================================================
+      # CDN PROCESSING STEPS (optional)
+      # ============================================================================
+      # Validate CDN environment variables and set default asset extensions
+      - name: Validate CDN configuration
+        if: ${{ inputs.cdn_enabled }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # NOTE: This step exits successfully even when validation fails
+          # to allow the workflow to continue without CDN processing
+          if [[ -z "${CDN_ACCOUNT_NAME:-}" || -z "${CDN_CONTAINER:-}" || -z "${CDN_BASE_URL:-}" || -z "${CDN_NAMESPACE:-}" ]]; then
+            echo "CDN is enabled but one or more CDN_* vars are missing."
+            echo "CDN_ACCOUNT_NAME=${CDN_ACCOUNT_NAME:-<empty>}"
+            echo "CDN_CONTAINER=${CDN_CONTAINER:-<empty>}"
+            echo "CDN_BASE_URL=${CDN_BASE_URL:-<empty>}"
+            echo "CDN_NAMESPACE=${CDN_NAMESPACE:-<empty>}"
+            echo "Skipping CDN rewrite/upload."
+            exit 0
+          fi
+
+          if [[ -z "${ASSET_EXTS:-}" ]]; then
+            echo "ASSET_EXTS is empty; using default ${CDN_ASSET_EXTS_DEFAULT}"
+            echo "ASSET_EXTS=${CDN_ASSET_EXTS_DEFAULT}" >> "$GITHUB_ENV"
+          fi
+
+      # Extract static files from built image for CDN processing
+      - name: Extract static files from runtime image
+        if: ${{ inputs.cdn_enabled }}
+        shell: bash
+        env:
+          IMAGE: ${{ steps.vars.outputs.image }}
+          APP_VERSION: ${{ steps.vars.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          CID="$(docker create "${IMAGE}:${APP_VERSION}")"
+          trap 'docker rm -f "${CID}" 2>/dev/null || true' EXIT
+
+          mkdir -p site
+          docker cp "${CID}:${RUNTIME_STATIC_ROOT}/." site
+          echo "Extracted static files from ${RUNTIME_STATIC_ROOT} into ./site"
+          ls -R site || true
+
+          echo "CID=${CID}" >> "$GITHUB_ENV"
+
+      # Generate content-based hash of assets for CDN cache
+      - name: Compute CDN asset version
+        if: ${{ inputs.cdn_enabled }}
+        id: cdn_asset_version
+        shell: bash
+        env:
+          ASSET_EXTS: ${{ env.ASSET_EXTS }}
+        run: |
+          set -euo pipefail
+
+          SRC_DIR="site"
+          ASSET_EXTS="${ASSET_EXTS}"
+
+          echo "Using asset extensions for versioning: ${ASSET_EXTS}"
+
+          FIND_EXPR=""
+          OLD_IFS="$IFS"
+          IFS=','
+          for ext in $ASSET_EXTS; do
+            ext_trim="$(printf '%s' "$ext" | xargs)"
+            [ -z "${ext_trim}" ] && continue
+            if [ -z "${FIND_EXPR}" ]; then
+              FIND_EXPR="-name '*.${ext_trim}'"
+            else
+              FIND_EXPR="${FIND_EXPR} -o -name '*.${ext_trim}'"
+            fi
+          done
+          IFS="$OLD_IFS"
+
+          if [ -z "${FIND_EXPR}" ]; then
+            echo "No valid asset extensions in ASSET_EXTS; using fallback CDN asset version." >&2
+            VERSION="noassets000000"
+            echo "cdn_asset_version=${VERSION}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          TMP="$(mktemp)"
+
+          HASH="$(
+            eval "find \"${SRC_DIR}\" -type f \\( ${FIND_EXPR} \\) -print0" \
+              | tee "$TMP" \
+              | sort -z \
+              | xargs -0 sha256sum 2>/dev/null \
+              | sha256sum 2>/dev/null \
+              | cut -c1-12
+          )"
+
+          if [ ! -s "${TMP}" ]; then
+            echo "No matching asset files in ${SRC_DIR}; using fallback CDN asset version." >&2
+            VERSION="noassets000000"
+            echo "cdn_asset_version=${VERSION}" >> "$GITHUB_OUTPUT"
+            rm -f "${TMP}"
+            exit 0
+          fi
+
+          rm -f "${TMP}"
+
+          echo "Computed CDN asset version from assets: ${HASH}"
+          echo "cdn_asset_version=${HASH}" >> "$GITHUB_OUTPUT"
+
+      # Rewrite asset URLs in HTML, CSS, and JS files to point to CDN
+      - name: Rewrite asset URLs for CDN (Perl-based, in extracted site)
+        if: ${{ inputs.cdn_enabled }}
+        shell: bash
+        env:
+          CDN_ASSET_VERSION: ${{ steps.cdn_asset_version.outputs.cdn_asset_version }}
+          CDN_BASE_URL: ${{ env.CDN_BASE_URL }}
+          CDN_CONTAINER: ${{ env.CDN_CONTAINER }}
+          CDN_NAMESPACE: ${{ env.CDN_NAMESPACE }}
+          ASSET_EXTS: ${{ env.ASSET_EXTS }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${CDN_ASSET_VERSION}" ]; then
+            echo "CDN_ASSET_VERSION is empty; skipping rewrite." >&2
+            exit 0
+          fi
+
+          if [ -z "${CDN_BASE_URL}" ] || [ -z "${CDN_CONTAINER}" ]; then
+            echo "CDN_BASE_URL or CDN_CONTAINER is not set; skipping rewrite." >&2
+            exit 0
+          fi
+
+          APP_NAME="${{ steps.vars.outputs.app_name }}"
+          CDN_PREFIX="${CDN_BASE_URL%/}/${CDN_CONTAINER}/${CDN_NAMESPACE}/${APP_NAME}/${CDN_ASSET_VERSION}"
+
+          EXT_PATTERN="$(printf '%s' "${ASSET_EXTS}" | tr -d '[:space:]' | sed 's/,/|/g')"
+
+          if [ -z "${EXT_PATTERN}" ]; then
+            echo "No valid extensions in ASSET_EXTS; skipping rewrite." >&2
+            exit 0
+          fi
+
+          export CDN_PREFIX EXT_PATTERN
+
+          # Function to rewrite a specific file type
+          rewrite_file_type() {
+            local file_type="$1"
+            local file_pattern="$2"
+            local perl_script="$3"
+
+            echo "Rewriting ${file_type} assets to CDN prefix: ${CDN_PREFIX}"
+            echo "Matching extensions: ${ASSET_EXTS}"
+
+            find site -type f -name "${file_pattern}" -print0 |
+              while IFS= read -r -d '' f; do
+                rel="${f#site/}"
+                rel_dir="$(dirname "$rel")"
+                if [ "${rel_dir}" = "." ]; then
+                  rel_dir=""
+                fi
+
+                FILE_DIR="$rel_dir" perl -0pi -e "$perl_script" "$f"
+              done
+          }
+
+          # HTML rewrite
+          rewrite_file_type "HTML" "*.html" '
+            my $cdn  = $ENV{CDN_PREFIX}  // q{};
+            my $exts = $ENV{EXT_PATTERN} // q{};
+            my $dir  = $ENV{FILE_DIR}    // q{};
+            exit 0 unless $cdn && $exts;
+
+            my $pat = qr{(src|href|data-src)=(["\x27])([^"\x27]+\.(?:$exts)(?:[#?][^"\x27]*)?)\2}i;
+
+            s{$pat}{
+              my ($attr, $q, $path) = ($1, $2, $3);
+              if ($path =~ m{^(?:[a-zA-Z][a-zA-Z0-9+.+-]*:|//)}) {
+                "$attr=$q$path$q";
+              } else {
+                my $p = $path;
+                $p =~ s{^\./}{};
+                if ($p =~ m{^/}) {
+                  $p =~ s{^/}{};
+                } else {
+                  $p = $dir ? "$dir/$p" : $p;
+                }
+                print STDERR "[CDN-REWRITE] $path -> $cdn/$p\n";
+                "$attr=$q$cdn/$p$q";
+              }
+            }eg;
+          '
+
+          # CSS rewrite
+          rewrite_file_type "CSS" "*.css" '
+            my $cdn  = $ENV{CDN_PREFIX}  // q{};
+            my $exts = $ENV{EXT_PATTERN} // q{};
+            my $dir  = $ENV{FILE_DIR}     // q{};
+            exit 0 unless $cdn && $exts;
+
+            my $is_abs = sub {
+              my ($p) = @_;
+              return $p =~ m{^(?:[a-zA-Z][a-zA-Z0-9+.+-]*:|//|data:)}i;
+            };
+
+            my $rewrite = sub {
+              my ($path) = @_;
+              return $path if $is_abs->($path);
+              my $p = $path;
+              $p =~ s{^\./}{};
+              if ($p =~ m{^/}) {
+                $p =~ s{^/}{};
+              } else {
+                $p = $dir ? "$dir/$p" : $p;
+              }
+              return "$cdn/$p";
+            };
+
+            my $url_pat = qr{url\(\s*([\"\x27]?)([^\"\x27\)]+\.(?:$exts)(?:[#?][^\"\x27\)]*)?)\1\s*\)}i;
+            s{$url_pat}{
+              my ($q, $path) = ($1, $2);
+              my $new = $rewrite->($path);
+              "url(" . ($q // q{}) . $new . ($q // q{}) . ")";
+            }eg;
+
+            my $import_pat = qr{\@import\s+(?:url\()?([\"\x27]?)([^\"\x27\)]+\.(?:$exts)(?:[#?][^\"\x27\)]*)?)\1\)?}i;
+            s{$import_pat}{
+              my ($q, $path) = ($1, $2);
+              my $new = $rewrite->($path);
+              "\@import " . ($q // q{}) . $new . ($q // q{}) . "";
+            }eg;
+          '
+
+          # JS rewrite
+          rewrite_file_type "JS" "*.js" '
+            my $cdn  = $ENV{CDN_PREFIX}  // q{};
+            my $exts = $ENV{EXT_PATTERN} // q{};
+            my $dir  = $ENV{FILE_DIR}      // q{};
+            exit 0 unless $cdn && $exts;
+
+            my $is_abs = sub {
+              my ($p) = @_;
+              return $p =~ m{^(?:[a-zA-Z][a-zA-Z0-9+.+-]*:|//|data:)}i;
+            };
+
+            my $rewrite = sub {
+              my ($path) = @_;
+              return $path if $is_abs->($path);
+              my $p = $path;
+              $p =~ s{^\./}{};
+              if ($p =~ m{^/}) {
+                $p =~ s{^/}{};
+              } else {
+                $p = $dir ? "$dir/$p" : $p;
+              }
+              return "$cdn/$p";
+            };
+
+            my $str_pat = qr{([\"\x27])([^\"\x27]+?\.(?:$exts)(?:[#?][^\"\x27]*)?)\1}i;
+            s{$str_pat}{
+              my ($q, $path) = ($1, $2);
+              my $new = $rewrite->($path);
+              $q . $new . $q;
+            }eg;
+          '
+
+      # Copy CDN-rewritten files back into container and commit as new image
+      - name: Copy rewritten site back into container and commit
+        if: ${{ inputs.cdn_enabled }}
+        shell: bash
+        env:
+          CID: ${{ env.CID }}
+          IMAGE: ${{ steps.vars.outputs.image }}
+          APP_VERSION: ${{ steps.vars.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CID:-}" ]; then
+            echo "No container ID found; cannot commit rewritten site." >&2
+            exit 1
+          fi
+
+          trap 'docker rm -f "${CID}" 2>/dev/null || true' EXIT
+
+          echo "Copying rewritten site back into container ${CID}:${RUNTIME_STATIC_ROOT}"
+          docker cp site/. "${CID}:${RUNTIME_STATIC_ROOT}"
+
+          echo "Committing container ${CID} to ${IMAGE}:${APP_VERSION}"
+          docker commit "${CID}" "${IMAGE}:${APP_VERSION}"
+
+          docker rm "${CID}"
+
+      # Upload static assets to Azure CDN with immutable caching headers
+      - name: Upload assets to CDN
+        if: ${{ inputs.cdn_enabled }}
+        uses: azure/CLI@v2
+        env:
+          SAS_TOKEN: ${{ secrets.CDN_SAS_TOKEN }}
+          CDN_ACCOUNT_NAME: ${{ env.CDN_ACCOUNT_NAME }}
+          CDN_CONTAINER: ${{ env.CDN_CONTAINER }}
+          CDN_NAMESPACE: ${{ env.CDN_NAMESPACE }}
+          CDN_ASSET_VERSION: ${{ steps.cdn_asset_version.outputs.cdn_asset_version }}
+          ASSET_EXTS: ${{ env.ASSET_EXTS }}
+        with:
+          inlineScript: |
+            set -euo pipefail
+
+            if [ -z "${SAS_TOKEN:-}" ] || [ -z "${CDN_ACCOUNT_NAME:-}" ] || [ -z "${CDN_CONTAINER:-}" ]; then
+              echo "CDN upload config incomplete (missing SAS_TOKEN/CDN_ACCOUNT_NAME/CDN_CONTAINER); skipping upload."
+              exit 0
+            fi
+
+            SRC_DIR="site"
+            if [ ! -d "${SRC_DIR}" ]; then
+              echo "No site dir ${SRC_DIR}; nothing to upload." >&2
+              exit 0
+            fi
+
+            APP_NAME="${{ steps.vars.outputs.app_name }}"
+            PREFIX="${CDN_NAMESPACE}/${APP_NAME}/${CDN_ASSET_VERSION}"
+
+            echo "Checking if assets already exist at prefix ${PREFIX}..."
+
+            # If any blob exists under this prefix, assume this version has already been uploaded.
+            EXISTING_COUNT="$(
+              az storage blob list \
+                --account-name "${CDN_ACCOUNT_NAME}" \
+                --sas-token "${SAS_TOKEN}" \
+                --container-name "${CDN_CONTAINER}" \
+                --prefix "${PREFIX}/" \
+                --num-results 1 \
+                --query "length(@)" \
+                -o tsv
+            )"
+
+            if [ "${EXISTING_COUNT:-0}" != "0" ]; then
+              echo "Assets for prefix ${PREFIX} already exist (${EXISTING_COUNT}+ blob). Skipping upload."
+              exit 0
+            fi
+
+            echo "Uploading assets from ${SRC_DIR} to container ${CDN_CONTAINER} at prefix ${PREFIX}"
+            echo "Using asset extensions: ${ASSET_EXTS}"
+
+            OLD_IFS="$IFS"
+            IFS=','
+            for ext in $ASSET_EXTS; do
+              ext_trim="$(printf '%s' "$ext" | xargs)"
+              [ -z "${ext_trim}" ] && continue
+              pattern="*.${ext_trim}"
+              echo "  - Uploading assets matching pattern: ${pattern}"
+              az storage blob upload-batch \
+                --account-name "${CDN_ACCOUNT_NAME}" \
+                --sas-token "${SAS_TOKEN}" \
+                --destination "${CDN_CONTAINER}" \
+                --destination-path "${PREFIX}" \
+                --source "${SRC_DIR}" \
+                --pattern "${pattern}" \
+                --overwrite true \
+                --content-cache-control "public, max-age=31536000, immutable"
+            done
+            IFS="$OLD_IFS"
+            echo "CDN upload complete."
+
+      # Retag all metadata tags to point to the final committed image
+      - name: Normalize all tags to committed image
+        shell: bash
+        env:
+          IMAGE: ${{ steps.vars.outputs.image }}
+          APP_VERSION: ${{ steps.vars.outputs.version }}
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+
+          primary="${IMAGE}:${APP_VERSION}"
+
+          echo "Primary image (source for all tags): ${primary}"
+          docker image inspect "${primary}" > /dev/null 2>&1 || {
+            echo "Primary image ${primary} not found locally." >&2
+            exit 1
+          }
+
+          # tag is something like ghcr.io/bcit-ltc/infrastructure-documentation:latest
+          for tag in ${IMAGE_TAGS}; do
+            if [ "${tag}" = "${primary}" ]; then
+              continue
+            fi
+
+            echo "Retagging ${tag} to use the same image as ${primary}"
+            docker tag "${primary}" "${tag}"
+          done
+
+      # ============================================================================
+      # PUSH & SIGN STEPS
+      # ============================================================================
+      # Push all image tags to GitHub Container Registry
+      - name: Push all tags
+        shell: bash
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          echo "Image tags to push:"
+          printf '%s\n' ${IMAGE_TAGS}
+          for tag in ${IMAGE_TAGS}; do
+            echo "Pushing ${tag}"
+            docker push "${tag}"
+          done
+
+      # Image signing
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      # Sign container image digests
+      - name: Cosign sign by unique digest
+        shell: bash
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+
+          # Collect digest-based references for all tags
+          DIGEST_REFS=""
+
+          echo "Resolving digests for tags:"
+          printf '%s\n' ${IMAGE_TAGS}
+
+          for tag in ${IMAGE_TAGS}; do
+            echo "  - Inspecting ${tag}"
+            digest_ref="$(docker inspect --format='{{index .RepoDigests 0}}' "${tag}")"
+
+            if [ -z "${digest_ref}" ]; then
+              echo "Unable to resolve digest for ${tag}" >&2
+              exit 1
+            fi
+
+            DIGEST_REFS+="${digest_ref}"$'\n'
+          done
+
+          # Deduplicate digests
+          # (remove empty lines, sort, unique)
+          UNIQUE_DIGESTS="$(printf '%s' "${DIGEST_REFS}" | sed '/^$/d' | sort -u)"
+
+          echo "Unique digests to sign:"
+          printf '%s\n' ${UNIQUE_DIGESTS}
+
+          # Sign each unique digest once
+          for digest in ${UNIQUE_DIGESTS}; do
+            echo "Signing ${digest}"
+            cosign sign --yes "${digest}"
+          done
+
+  # ============================================================================
+  # HELM CHART UPDATE JOB
+  # ============================================================================
+  # Trigger helm-charts repository workflow to update chart with new app version
+  dispatch-helm-charts:
+    runs-on: ubuntu-latest
+    needs: [build-app-image]
+    if: ${{ needs.build-app-image.outputs.version != '' }}
+    steps:
+      # Generate GitHub App token for triggering helm-charts workflow
+      - id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.ORG_HELM_CHART_UPDATER_ID }}
+          private-key: ${{ secrets.ORG_HELM_CHART_UPDATER_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: helm-charts
+          permission-actions: write
+          permission-contents: read
+
+      # Trigger helm-charts repository workflow to update chart version
+      - name: Trigger `helm-charts` repo remote-bump
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          CHART: ${{ needs.build-app-image.outputs.app_name }}
+          VER: ${{ needs.build-app-image.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh workflow run remote-bump.yaml \
+            -R bcit-ltc/helm-charts \
+            -r main \
+            -f chart_name="$CHART" \
+            -f version="$VER"
+          echo "Dispatched remote-bump.yaml for ${CHART} -> ${VER}"
