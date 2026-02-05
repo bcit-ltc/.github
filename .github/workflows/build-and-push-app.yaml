@@ -307,12 +307,29 @@ jobs:
               # Directory of this HTML file relative to site/ (e.g. "multimedia/_SOH/3DBirth")
               rel="${f#site/}"
               rel_dir="$(dirname "$rel")"
+              if [ "${rel_dir}" = "." ]; then
+                rel_dir=""
+              fi
 
               HTML_DIR="$rel_dir" perl -0pi -e '
                 my $cdn  = $ENV{CDN_PREFIX}  // q{};
                 my $exts = $ENV{EXT_PATTERN} // q{};
                 my $dir  = $ENV{HTML_DIR}    // q{};
                 exit 0 unless $cdn && $exts;
+
+                my $norm = sub {
+                  my ($p) = @_;
+                  my @out;
+                  for my $seg (split m{/+}, $p) {
+                    next if $seg eq q{} || $seg eq q{.};
+                    if ($seg eq q{..}) {
+                      pop @out if @out;
+                      next;
+                    }
+                    push @out, $seg;
+                  }
+                  return join q{/}, @out;
+                };
 
                 my $pat = qr{(src|href|data-src)=(["\x27])([^"\x27]+\.(?:$exts)(?:[#?][^"\x27]*)?)\2}i;
 
@@ -335,6 +352,9 @@ jobs:
                       # Relative to this HTML file directory
                       $p = $dir ? "$dir/$p" : $p;
                     }
+
+                    # Normalize ./ and ../ segments
+                    $p = $norm->($p);
 
                     print STDERR "[CDN-REWRITE] $path -> $cdn/$p\n";
 
@@ -395,6 +415,20 @@ jobs:
                 my $dir  = $ENV{CSS_DIR}     // q{};
                 exit 0 unless $cdn && $exts;
 
+                my $norm = sub {
+                  my ($p) = @_;
+                  my @out;
+                  for my $seg (split m{/+}, $p) {
+                    next if $seg eq q{} || $seg eq q{.};
+                    if ($seg eq q{..}) {
+                      pop @out if @out;
+                      next;
+                    }
+                    push @out, $seg;
+                  }
+                  return join q{/}, @out;
+                };
+
                 my $is_abs = sub {
                   my ($p) = @_;
                   return $p =~ m{^(?:[a-zA-Z][a-zA-Z0-9+.+-]*:|//|data:)}i;
@@ -410,6 +444,7 @@ jobs:
                   } else {
                     $p = $dir ? "$dir/$p" : $p;
                   }
+                  $p = $norm->($p);
                   return "$cdn/$p";
                 };
 
@@ -477,8 +512,21 @@ jobs:
               JS_DIR="$rel_dir" perl -0pi -e '
                 my $cdn  = $ENV{CDN_PREFIX}  // q{};
                 my $exts = $ENV{EXT_PATTERN} // q{};
-                my $dir  = $ENV{JS_DIR}      // q{};
                 exit 0 unless $cdn && $exts;
+
+                my $norm = sub {
+                  my ($p) = @_;
+                  my @out;
+                  for my $seg (split m{/+}, $p) {
+                    next if $seg eq q{} || $seg eq q{.};
+                    if ($seg eq q{..}) {
+                      pop @out if @out;
+                      next;
+                    }
+                    push @out, $seg;
+                  }
+                  return join q{/}, @out;
+                };
 
                 my $is_abs = sub {
                   my ($p) = @_;
@@ -489,12 +537,12 @@ jobs:
                   my ($path) = @_;
                   return $path if $is_abs->($path);
                   my $p = $path;
-                  $p =~ s{^\./}{};
                   if ($p =~ m{^/}) {
                     $p =~ s{^/}{};
                   } else {
-                    $p = $dir ? "$dir/$p" : $p;
+                    $p =~ s{^\./}{};
                   }
+                  $p = $norm->($p);
                   return "$cdn/$p";
                 };
 
