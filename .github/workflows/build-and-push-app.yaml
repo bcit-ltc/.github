@@ -1,3 +1,12 @@
+# =============================================================================
+# Build and push app/chart images
+# =============================================================================
+# This workflow is designed to be called from repo-level workflows (workflow_call).
+# It: (1) computes a version via semantic-release, (2) builds the Docker image,
+# (3) optionally rewrites asset URLs to a CDN and uploads assets, (4) pushes
+# the image and signs it, (5) triggers the helm-charts repo to bump the chart.
+# =============================================================================
+
 name: Build and push app/chart images
 
 on:
@@ -10,17 +19,17 @@ on:
         type: boolean
         default: false
       cdn_asset_exts:
-        description: "Comma-separated list of asset extensions"
+        description: "Comma-separated list of asset extensions to rewrite/upload (e.g. jpg,png,js,css)"
         required: false
         type: string
-        default: ""   # we'll fall back to a global default
+        default: ""   # when empty, workflow uses CDN_ASSET_EXTS_DEFAULT from env below
     secrets:
       ORG_HELM_CHART_UPDATER_ID:
-        required: true
+        required: true   # GitHub App ID used to trigger helm-charts remote-bump
       ORG_HELM_CHART_UPDATER_PRIVATE_KEY:
-        required: true
+        required: true   # Private key for the above App
       CDN_SAS_TOKEN:
-        required: false  # only needed when CDN is actually enabled
+        required: false  # Azure Blob SAS token; only needed when cdn_enabled is true
     outputs:
       app_version:
         description: "Computed app version from semantic-release"
@@ -35,18 +44,18 @@ permissions:
 env:
   IMAGE_REPOSITORY: ghcr.io/${{ github.repository }}
 
-  # Org-level CDN config (from org or repo variables)
-  CDN_ACCOUNT_NAME: ${{ vars.CDN_ACCOUNT_NAME }}
-  CDN_BASE_URL: ${{ vars.CDN_BASE_URL }}
-  CDN_CONTAINER: ${{ vars.CDN_CONTAINER }}
-  CDN_NAMESPACE: ${{ vars.CDN_NAMESPACE }}
+  # CDN: set in org or repo Variables (Settings -> Secrets and variables -> Actions)
+  CDN_ACCOUNT_NAME: ${{ vars.CDN_ACCOUNT_NAME }}   # Azure storage account name
+  CDN_BASE_URL: ${{ vars.CDN_BASE_URL }}           # e.g. https://account.blob.core.windows.net
+  CDN_CONTAINER: ${{ vars.CDN_CONTAINER }}         # Blob container name for static assets
+  CDN_NAMESPACE: ${{ vars.CDN_NAMESPACE }}         # e.g. bcit-ltc (path segment under container)
 
-  # Default asset extensions; can be overridden per-call via inputs.cdn_asset_exts
+  # File extensions treated as static assets (rewritten in HTML/CSS/JS and uploaded to CDN)
   CDN_ASSET_EXTS_DEFAULT: jpg,jpeg,png,webp,gif,svg,ico,mp4,webm,mp3,ogg,woff,woff2,ttf,otf,css,js,map
 
 jobs:
 
-  # Combined: compute version, build image, optional CDN rewrite/upload, push & sign
+  # Single job: version -> build image -> optional CDN rewrite/upload -> push -> sign
   build-app-image:
     runs-on: ubuntu-latest
     permissions:
@@ -65,9 +74,12 @@ jobs:
       tags: ${{ steps.meta.outputs.tags }}
 
     steps:
+      # -------------------------------------------------------------------------
+      # Versioning: semantic-release determines if this is a release and version
+      # -------------------------------------------------------------------------
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0   # needed for semantic-release to see full history
           lfs: false
 
       - name: Run Semantic Release
@@ -83,6 +95,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # Outputs: image (lowercase repo), is_release, version (e.g. 1.2.3 or 1.2.4-rc.<timestamp>.<sha>)
       - name: Compute version
         id: vars
         shell: bash
@@ -131,6 +144,7 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
+      # Produces tags list: e.g. ghcr.io/org/repo:1.2.3, :1.2, :stable, :latest (latter only on release when enabled)
       - name: Generate container metadata
         id: meta
         uses: docker/metadata-action@9ec57ed1fcdbf14dcef7dfbe97b2010124a938b7
@@ -145,6 +159,7 @@ jobs:
           flavor: |
             latest=true
 
+      # Build only; image is loaded into runner's Docker. Push happens later (after optional CDN rewrite).
       - name: Build image (no push, load into local Docker)
         id: build
         env:
@@ -163,7 +178,12 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # ---- CDN steps ----
+      # =========================================================================
+      # CDN steps (only when inputs.cdn_enabled is true)
+      # We extract the built app's static files, rewrite asset URLs to the CDN
+      # base, copy the rewritten files back into the image, then upload assets
+      # to Azure Blob so they are served from the CDN.
+      # =========================================================================
       - name: Validate CDN configuration
         if: ${{ inputs.cdn_enabled }}
         shell: bash
@@ -204,6 +224,7 @@ jobs:
 
           echo "CID=${CID}" >> "$GITHUB_ENV"
 
+      # Hash of all asset file contents -> used as CDN path segment for cache busting (e.g. .../30435ca7d14d/logo.png)
       - name: Compute CDN asset version
         if: ${{ inputs.cdn_enabled }}
         id: cdn_asset_version
@@ -218,6 +239,7 @@ jobs:
 
           echo "Using asset extensions for versioning: ${ASSET_EXTS}"
 
+          # Build find expression: -name '*.png' -o -name '*.js' etc.
           FIND_EXPR=""
           OLD_IFS="$IFS"
           IFS=','
@@ -286,6 +308,7 @@ jobs:
           fi
 
           APP_NAME="${{ github.event.repository.name }}"
+          # e.g. https://account.blob.../container/bcit-ltc/repo-name/30435ca7d14d
           CDN_PREFIX="${CDN_BASE_URL%/}/${CDN_CONTAINER}/${CDN_NAMESPACE}/${APP_NAME}/${CDN_ASSET_VERSION}"
 
           EXT_PATTERN="$(printf '%s' "${ASSET_EXTS}" | tr -d '[:space:]' | sed 's/,/|/g')"
@@ -298,10 +321,8 @@ jobs:
           echo "Rewriting HTML assets to CDN prefix: ${CDN_PREFIX}"
           echo "Matching extensions: ${ASSET_EXTS}"
 
-          # Make CDN_PREFIX and EXT_PATTERN available to Perl
           export CDN_PREFIX EXT_PATTERN
 
-          # For each HTML file, rewrite asset URLs relative to that file directory
           find site -type f -name '*.html' -print0 |
             while IFS= read -r -d '' f; do
               # Directory of this HTML file relative to site/ (e.g. "multimedia/_SOH/3DBirth")
@@ -331,13 +352,15 @@ jobs:
                   return join q{/}, @out;
                 };
 
+                # Match src/href/data-src="...path.ext" or similar with single quotes
                 my $pat = qr{(src|href|data-src)=(["\x27])([^"\x27]+\.(?:$exts)(?:[#?][^"\x27]*)?)\2}i;
 
                 s{$pat}{
                   my ($attr, $q, $path) = ($1, $2, $3);
+                  $path =~ s{^\s+|\s+$}{}g;
 
-                  # Absolute URL (scheme or protocol-relative) -> leave unchanged
-                  if ($path =~ m{^(?:[a-zA-Z][a-zA-Z0-9+.+-]*:|//)}) {
+                  # Absolute URL or already rewritten -> leave unchanged (avoids double CDN prefix)
+                  if ($path =~ m{://} || ($cdn ne q{} && index($path, $cdn) == 0) || $path =~ m{^(?:[a-zA-Z][a-zA-Z0-9+.+-]*:|//)}) {
                     "$attr=$q$path$q";
                   } else {
                     my $p = $path;
@@ -415,6 +438,7 @@ jobs:
                 my $dir  = $ENV{CSS_DIR}     // q{};
                 exit 0 unless $cdn && $exts;
 
+                # Normalize path: collapse slashes, resolve . and ..
                 my $norm = sub {
                   my ($p) = @_;
                   my @out;
@@ -429,13 +453,18 @@ jobs:
                   return join q{/}, @out;
                 };
 
+                # Skip if already absolute (://), already rewritten (starts with CDN), or data:/scheme
                 my $is_abs = sub {
                   my ($p) = @_;
+                  $p =~ s{^\s+|\s+$}{}g;
+                  return 1 if $p =~ m{://};
+                  return 1 if $cdn ne q{} && index($p, $cdn) == 0;
                   return $p =~ m{^(?:[a-zA-Z][a-zA-Z0-9+.+-]*:|//|data:)}i;
                 };
 
                 my $rewrite = sub {
                   my ($path) = @_;
+                  $path =~ s{^\s+|\s+$}{}g;
                   return $path if $is_abs->($path);
                   my $p = $path;
                   $p =~ s{^\./}{};
@@ -455,6 +484,7 @@ jobs:
                   "url(" . ($q // q{}) . $new . ($q // q{}) . ")";
                 }eg;
 
+                # @import url(...) in CSS
                 my $import_pat = qr{\@import\s+(?:url\()?([\"\x27]?)([^\"\x27\)]+\.(?:$exts)(?:[#?][^\"\x27\)]*)?)\1\)?}i;
                 s{$import_pat}{
                   my ($q, $path) = ($1, $2);
@@ -464,6 +494,8 @@ jobs:
               ' "$f"
             done
 
+      # Rewrite quoted strings in JS that look like asset paths (e.g. "/static/logo.png") -> full CDN URL.
+      # We skip paths that already contain "://" or start with CDN_PREFIX to avoid double-rewriting (safe for all repos).
       - name: Rewrite JS asset URLs for CDN (Perl-based, in extracted site)
         if: ${{ inputs.cdn_enabled }}
         shell: bash
@@ -530,11 +562,15 @@ jobs:
 
                 my $is_abs = sub {
                   my ($p) = @_;
+                  $p =~ s{^\s+|\s+$}{}g;
+                  return 1 if $p =~ m{://};   # already full or protocol-relative URL
+                  return 1 if $cdn ne q{} && index($p, $cdn) == 0;  # already rewritten
                   return $p =~ m{^(?:[a-zA-Z][a-zA-Z0-9+.+-]*:|//|data:)}i;
                 };
 
                 my $rewrite = sub {
                   my ($path) = @_;
+                  $path =~ s{^\s+|\s+$}{}g;
                   return $path if $is_abs->($path);
                   my $p = $path;
                   if ($p =~ m{^/}) {
@@ -546,6 +582,7 @@ jobs:
                   return "$cdn/$p";
                 };
 
+                # Match quoted strings that look like asset paths (e.g. "/static/logo.png")
                 my $str_pat = qr{([\"\x27])([^\"\x27]+?\.(?:$exts)(?:[#?][^\"\x27]*)?)\1}i;
                 s{$str_pat}{
                   my ($q, $path) = ($1, $2);
@@ -579,6 +616,7 @@ jobs:
 
           docker rm "${CID}"
 
+      # Upload only asset files (by extension) from ./site to Azure Blob under PREFIX; skip if prefix already has blobs (idempotent)
       - name: Upload assets to CDN
         if: ${{ inputs.cdn_enabled }}
         uses: azure/CLI@v2
@@ -680,7 +718,9 @@ jobs:
             docker tag "${primary}" "${tag}"
           done
 
-      # ---- Push & sign ----
+      # -------------------------------------------------------------------------
+      # Push all tags to ghcr.io, then sign the image(s) with Cosign (sigstore)
+      # -------------------------------------------------------------------------
       - name: Push all tags
         shell: bash
         env:
@@ -734,7 +774,9 @@ jobs:
             cosign sign --yes "${digest}"
           done
 
-  # Trigger helm-charts repo remote-bump workflow to update chart version
+  # =============================================================================
+  # Notify helm-charts repo to bump the chart version for this app
+  # =============================================================================
   dispatch-helm-charts:
     runs-on: ubuntu-latest
     needs: [build-app-image]
